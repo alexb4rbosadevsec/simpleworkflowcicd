@@ -66,6 +66,3 @@ It emphasizes that automating builds, tests, and artifact management can be done
 📌 License
 This project is licensed under MIT and is free for educational use.
 
-🔗 Quick Links
-GitHub Actions Workflow
-Illustrative Docker files source
