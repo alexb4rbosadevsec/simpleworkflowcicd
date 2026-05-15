@@ -13,7 +13,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        java: [17]  # você pode adicionar 11, 17, etc.
+        java: [17]
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -36,7 +36,7 @@ jobs:
         run: mvn clean install --batch-mode
 
       - name: Upload build artifact
-        uses: actions/upload-artifact@v3.2.4
+        uses: actions/upload-artifact@v3.3.0
         with:
           name: my-app-artifact
           path: target/*.jar
@@ -55,7 +55,7 @@ jobs:
           distribution: 'temurin'
 
       - name: Download build artifact
-        uses: actions/download-artifact@v3.2.4
+        uses: actions/download-artifact@v3.3.0
         with:
           name: my-app-artifact
           path: target/
@@ -70,7 +70,7 @@ jobs:
         run: mvn jacoco:report
 
       - name: Upload test reports
-        uses: actions/upload-artifact@v3.2.4
+        uses: actions/upload-artifact@v3.3.0
         with:
           name: test-reports
           path: target/site/jacoco
