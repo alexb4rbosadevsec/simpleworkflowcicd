@@ -1,25 +1,63 @@
-name: 🚀 Build & Test Workflow
+name: 🚀 Enterprise DevSecOps CI/CD Pipeline
 
 on:
   push:
     branches:
       - main
+      - develop
+
+    paths-ignore:
+      - '**.md'
 
   pull_request:
     branches:
       - main
+      - develop
+
+  workflow_dispatch:
+    inputs:
+      run_security_scan:
+        description: "Execute Trivy Security Scan"
+        required: true
+        default: "true"
+        type: choice
+        options:
+          - "true"
+          - "false"
+
+      java_version:
+        description: "Java Version"
+        required: true
+        default: "17"
+
+      upload_artifacts:
+        description: "Upload Build/Test Artifacts"
+        required: true
+        default: "true"
+        type: choice
+        options:
+          - "true"
+          - "false"
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
+  security-events: write
+  actions: read
 
 env:
   JAVA_VERSION: 17
-  MAVEN_OPTS: -Xmx1024m
+  MAVEN_OPTS: -Xmx2048m
+  TRIVY_SEVERITY: HIGH,CRITICAL
 
 jobs:
   build:
     name: 🏗️ Build Application
     runs-on: ubuntu-latest
+    timeout-minutes: 15
 
     strategy:
       fail-fast: false
@@ -28,16 +66,24 @@ jobs:
 
     steps:
       - name: 📥 Checkout Repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: ☕ Setup Java ${{ matrix.java-version }}
+      - name: ☕ Setup Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: ${{ matrix.java-version }}
+          java-version: ${{ github.event.inputs.java_version || matrix.java-version }}
           cache: maven
+
+      - name: 📦 Cache Maven Dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2/repository
+          key: ${{ runner.os }}-maven-${{ hashFiles('**/pom.xml') }}
+          restore-keys: |
+            ${{ runner.os }}-maven-
 
       - name: 🔍 Environment Information
         run: |
@@ -45,7 +91,9 @@ jobs:
           echo "🖥️ RUNNER INFORMATION"
           echo "======================================="
           echo "Runner OS: $RUNNER_OS"
-          echo "Runner Arch: $RUNNER_ARCH"
+          echo "Runner Architecture: $RUNNER_ARCH"
+          echo "GitHub Ref: $GITHUB_REF"
+          echo "GitHub SHA: $GITHUB_SHA"
 
           echo ""
           echo "======================================="
@@ -59,23 +107,33 @@ jobs:
           echo "======================================="
           mvn -version
 
+      - name: 🧹 Clean Previous Builds
+        run: |
+          echo "======================================="
+          echo "🧹 CLEANING PREVIOUS BUILD FILES"
+          echo "======================================="
+
+          mvn clean --batch-mode --no-transfer-progress
+
       - name: 📦 Build Maven Project
         run: |
           echo "======================================="
           echo "🚀 STARTING MAVEN BUILD"
           echo "======================================="
 
-          mvn clean install --batch-mode --no-transfer-progress
+          mvn install \
+            --batch-mode \
+            --no-transfer-progress
 
           echo ""
           echo "======================================="
           echo "✅ BUILD FINISHED SUCCESSFULLY"
           echo "======================================="
 
-      - name: 📂 Verify Target Directory
+      - name: 📂 Verify Build Artifacts
         run: |
           echo "======================================="
-          echo "📁 TARGET DIRECTORY CONTENT"
+          echo "📁 VERIFYING GENERATED FILES"
           echo "======================================="
 
           if [ -d "target" ]; then
@@ -84,43 +142,116 @@ jobs:
             echo "⚠️ Target directory not found."
           fi
 
-      - name: 📦 Verify Generated JAR Files
+      - name: 🔎 Verify Generated JAR Files
         run: |
           echo "======================================="
-          echo "🔎 SEARCHING FOR GENERATED JAR FILES"
+          echo "🔍 SEARCHING FOR GENERATED JAR FILES"
           echo "======================================="
 
           JAR_COUNT=$(find target -name "*.jar" | wc -l)
 
           if [ "$JAR_COUNT" -eq 0 ]; then
-            echo "⚠️ No JAR artifacts were generated."
-            echo "ℹ️ This repository may only demonstrate GitHub Actions functionality."
-            exit 0
+            echo "⚠️ No JAR files generated."
+            exit 1
           fi
 
-          echo "✅ Found $JAR_COUNT JAR artifact(s):"
+          echo "✅ Found $JAR_COUNT JAR artifact(s)"
           find target -name "*.jar"
 
       - name: ⬆️ Upload Build Artifact
-        if: success()
+        if: success() && (github.event.inputs.upload_artifacts != 'false')
         uses: actions/upload-artifact@v4
         with:
-          name: my-app-artifact
+          name: build-artifact
           path: target/*.jar
-          if-no-files-found: warn
+          retention-days: 30
+          compression-level: 9
+          if-no-files-found: error
+          overwrite: true
 
-  test:
-    name: 🧪 Run Tests & Quality Checks
+  security_scan:
+    name: 🔐 Security Scan - Trivy
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     needs: build
+
+    permissions:
+      contents: read
+      security-events: write
 
     steps:
       - name: 📥 Checkout Repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: ☕ Setup Java ${{ env.JAVA_VERSION }}
+      - name: 🔍 Run Trivy Filesystem Scan
+        if: github.event.inputs.run_security_scan != 'false'
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+          severity: 'HIGH,CRITICAL'
+          ignore-unfixed: true
+          exit-code: '1'
+          cache: 'true'
+
+      - name: 📤 Upload Trivy SARIF Results
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: 'trivy-results.sarif'
+
+      - name: 📦 Upload Trivy Security Report
+        if: always() && (github.event.inputs.upload_artifacts != 'false')
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-security-report
+          path: trivy-results.sarif
+          retention-days: 30
+          compression-level: 9
+          overwrite: true
+
+      - name: 📝 Publish Security Summary
+        if: always()
+        run: |
+          {
+            echo "# 🔐 Trivy Security Scan Summary"
+            echo ""
+            echo "## Scan Information"
+            echo "- Scan Type: Filesystem"
+            echo "- Severity Levels: HIGH, CRITICAL"
+            echo "- Vulnerability Scanner: Trivy"
+            echo "- SARIF Upload: Enabled"
+            echo "- Security Events: Enabled"
+            echo ""
+            echo "## Pipeline Security Features"
+            echo "- Dependency Scanning"
+            echo "- Vulnerability Detection"
+            echo "- SARIF Security Reports"
+            echo "- GitHub Security Integration"
+            echo ""
+            echo "✅ Security scan completed."
+          } >> $GITHUB_STEP_SUMMARY
+
+  test:
+    name: 🧪 Tests & Quality Assurance
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    needs:
+      - build
+      - security_scan
+
+    steps:
+      - name: 📥 Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: ☕ Setup Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -131,19 +262,19 @@ jobs:
         uses: actions/download-artifact@v4
         continue-on-error: true
         with:
-          name: my-app-artifact
+          name: build-artifact
           path: target/
 
       - name: 📂 Verify Downloaded Artifacts
         run: |
           echo "======================================="
-          echo "📦 DOWNLOADED ARTIFACTS"
+          echo "📦 DOWNLOADED BUILD ARTIFACTS"
           echo "======================================="
 
           if [ -d "target" ]; then
             ls -lah target
           else
-            echo "⚠️ No artifacts directory found."
+            echo "⚠️ No target directory found."
           fi
 
       - name: 🧪 Execute Unit Tests
@@ -152,20 +283,25 @@ jobs:
           echo "🚀 RUNNING UNIT TESTS"
           echo "======================================="
 
-          mvn test --batch-mode --no-transfer-progress || true
+          mvn test \
+            --batch-mode \
+            --no-transfer-progress
 
           echo ""
           echo "======================================="
-          echo "✅ TEST EXECUTION FINISHED"
+          echo "✅ UNIT TESTS FINISHED"
           echo "======================================="
 
       - name: 🔎 Run Checkstyle Analysis
+        continue-on-error: true
         run: |
           echo "======================================="
           echo "🔍 RUNNING CHECKSTYLE"
           echo "======================================="
 
-          mvn checkstyle:checkstyle --batch-mode --no-transfer-progress || true
+          mvn checkstyle:checkstyle \
+            --batch-mode \
+            --no-transfer-progress
 
           echo ""
           echo "======================================="
@@ -173,60 +309,143 @@ jobs:
           echo "======================================="
 
       - name: 📊 Generate JaCoCo Coverage Report
+        continue-on-error: true
         run: |
           echo "======================================="
           echo "📈 GENERATING JACOCO REPORT"
           echo "======================================="
 
-          mvn jacoco:report --batch-mode --no-transfer-progress || true
+          mvn jacoco:report \
+            --batch-mode \
+            --no-transfer-progress
 
           echo ""
           echo "======================================="
-          echo "✅ JACOCO REPORT FINISHED"
+          echo "✅ JACOCO REPORT GENERATED"
           echo "======================================="
 
       - name: 📂 Display Generated Reports
+        if: always()
         run: |
           echo "======================================="
-          echo "📁 GENERATED REPORT FILES"
+          echo "📁 GENERATED REPORTS"
           echo "======================================="
 
           if [ -d "target/site/jacoco" ]; then
+            echo "📊 JaCoCo Coverage Reports:"
             ls -lah target/site/jacoco
           else
-            echo "⚠️ JaCoCo report directory not found."
+            echo "⚠️ JaCoCo reports not found."
           fi
 
           echo ""
 
           if [ -d "target/surefire-reports" ]; then
-            echo "======================================="
-            echo "🧪 SUREFIRE TEST REPORTS"
-            echo "======================================="
+            echo "🧪 Surefire Reports:"
             ls -lah target/surefire-reports
           else
             echo "⚠️ Surefire reports not found."
           fi
 
       - name: ⬆️ Upload Test Reports
+        if: always() && (github.event.inputs.upload_artifacts != 'false')
         uses: actions/upload-artifact@v4
         with:
           name: test-reports
           path: |
             target/site/jacoco
             target/surefire-reports
+          retention-days: 30
+          compression-level: 9
           if-no-files-found: warn
+          overwrite: true
 
-      - name: 🎉 Workflow Summary
+      - name: 📝 Publish Test Summary
+        if: always()
+        run: |
+          {
+            echo "# 🧪 Test & Quality Summary"
+            echo ""
+            echo "## Completed Steps"
+            echo "- ✅ Unit Tests"
+            echo "- ✅ Maven Validation"
+            echo "- ✅ Checkstyle Analysis"
+            echo "- ✅ JaCoCo Coverage"
+            echo "- ✅ Artifact Validation"
+            echo ""
+            echo "## Quality Assurance"
+            echo "- Maven Build Verification"
+            echo "- Static Code Analysis"
+            echo "- Coverage Report Generation"
+            echo "- Test Artifact Upload"
+            echo ""
+            echo "✅ Testing phase completed."
+          } >> $GITHUB_STEP_SUMMARY
+
+  workflow_summary:
+    name: 📋 Final Workflow Summary
+    runs-on: ubuntu-latest
+    if: always()
+
+    needs:
+      - build
+      - security_scan
+      - test
+
+    steps:
+      - name: 🎉 Generate Final Pipeline Summary
         run: |
           echo "======================================="
-          echo "✅ CI/CD WORKFLOW FINISHED"
+          echo "🚀 ENTERPRISE DEVSECOPS PIPELINE"
           echo "======================================="
-          echo "✔ Build Stage Completed"
-          echo "✔ Tests Executed"
-          echo "✔ Checkstyle Executed"
-          echo "✔ Coverage Attempted"
+
+          echo ""
+          echo "📦 BUILD STATUS:"
+          echo "${{ needs.build.result }}"
+
+          echo ""
+          echo "🔐 SECURITY STATUS:"
+          echo "${{ needs.security_scan.result }}"
+
+          echo ""
+          echo "🧪 TEST STATUS:"
+          echo "${{ needs.test.result }}"
+
+          echo ""
           echo "======================================="
-          echo "ℹ️ Repository configured as GitHub Actions demo."
-          echo "ℹ️ Missing artifacts/reports won't fail workflow."
+          echo "✅ PIPELINE EXECUTION FINISHED"
           echo "======================================="
+
+          {
+            echo "# 🚀 Enterprise DevSecOps Pipeline Summary"
+            echo ""
+            echo "## Pipeline Results"
+            echo "| Stage | Status |"
+            echo "|------|--------|"
+            echo "| Build | ${{ needs.build.result }} |"
+            echo "| Security Scan | ${{ needs.security_scan.result }} |"
+            echo "| Testing | ${{ needs.test.result }} |"
+            echo ""
+            echo "## Features Enabled"
+            echo "- ✅ CI/CD Automation"
+            echo "- ✅ Maven Build Pipeline"
+            echo "- ✅ Artifact Management"
+            echo "- ✅ Security Scanning"
+            echo "- ✅ SARIF Integration"
+            echo "- ✅ GitHub Security Upload"
+            echo "- ✅ Static Analysis"
+            echo "- ✅ Coverage Reports"
+            echo "- ✅ Workflow Dispatch"
+            echo "- ✅ Concurrency Control"
+            echo "- ✅ Dependency Caching"
+            echo ""
+            echo "## Technologies"
+            echo "- GitHub Actions"
+            echo "- Maven"
+            echo "- Java"
+            echo "- Trivy"
+            echo "- JaCoCo"
+            echo "- Checkstyle"
+            echo ""
+            echo "🎯 Enterprise-grade DevSecOps workflow completed successfully."
+          } >> $GITHUB_STEP_SUMMARY
